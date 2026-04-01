@@ -39,7 +39,8 @@ local Config = {
     Menu_Logo = "rbxassetid://0",
     UIColor1 = Color3.fromRGB(199, 149, 237), UIColor2 = Color3.fromRGB(85, 0, 255),
     Rainbow_Enabled = false, Rainbow_Speed = 0.5, Watermark_Enabled = true, Keybinds_Enabled = true,
-    Aim_Enabled = false, Aim_Silent = false, Aim_Bind = Enum.UserInputType.MouseButton2,
+    Aim_Enabled = false, Aim_Bind = Enum.UserInputType.MouseButton2,
+    FreecamAim_Enabled = false, -- Это наш Magic Bullet
     Aim_Mode = "Camera", Aim_Target = "Head", Aim_Smooth = 20, Aim_Predict = 0, Aim_TeamCheck = false, Aim_DieCheck = true, Aim_FOV_Show = true, Aim_FOV_Radius = 150,
     Aim_VisibleCheck = false, Aim_HitChance = 100,
     Hitbox_Enabled = false, Hitbox_Mode = "All", Hitbox_Size = 10, Hitbox_Transparency = 50,
@@ -76,6 +77,15 @@ local bindingTarget, CachedTarget, FlingTarget = nil, nil, nil
 local isFlingToggled, squareToggled = false, false
 local dynamicGradientObjects = {}
 local RefreshConfigs
+
+-- Глобальные переменные
+local CurrentColor1 = Config.UIColor1
+local CurrentColor2 = Config.UIColor2
+local framesData = {}
+local lastNoclipState = false
+local noclippedVehicle = nil
+local lastHitboxState = false
+local expandedParts = {} 
 
 -- УНИВЕРСАЛЬНАЯ СИСТЕМА КОНФИГОВ
 local function SaveConfig(cfgName)
@@ -327,7 +337,8 @@ local function AddRGBPicker(parentTab, text, colorKey)
 end
 
 local espPosOpts = {"Top", "Bottom", "Left", "Right"}
-AddSetting(TabAim, "Enable Aimbot", "Aim_Enabled", "Aim_Bind"); AddSetting(TabAim, "Silent Aim", "Aim_Silent")
+AddSetting(TabAim, "Enable Aimbot", "Aim_Enabled", "Aim_Bind")
+AddSetting(TabAim, "Magic Bullet (Freecam)", "FreecamAim_Enabled")
 AddSetting(TabAim, "Aim Method", nil, nil, "Aim_Mode", {"Camera", "Mouse"}); AddSetting(TabAim, "Aim Target", nil, nil, "Aim_Target", {"Head", "Torso"}); AddSetting(TabAim, "Team Check", "Aim_TeamCheck"); AddSetting(TabAim, "Die Check", "Aim_DieCheck"); AddSetting(TabAim, "Show FOV Circle", "Aim_FOV_Show")
 AddSetting(TabAim, "Wall Check (Visible)", "Aim_VisibleCheck"); AddSlider(TabAim, "Hit Chance %", "Aim_HitChance", 0, 100)
 AddSetting(TabAim, "Hitbox Expander", "Hitbox_Enabled", nil, "Hitbox_Mode", {"All", "Target"});
@@ -505,7 +516,6 @@ function Aiming.GetClosestTargetPartToCursor(Character)
     return ClosestPart, ClosestPartPosition, ClosestPartOnScreen, ClosestPartMagnitudeFromMouse
 end
 
--- ИСПРАВЛЕНИЕ: Убрана рандомизация шанса из фонового поиска, чтобы таргет не моргал и хитбокс не пропадал
 function Aiming.GetClosestPlayerToCursor()
     local TargetPart = nil
     local ClosestPlayer = nil
@@ -547,63 +557,57 @@ local function GetPlayerNearMouse()
     return closestPlayer
 end
 
-local framesData = {}; local flyBodyVel = nil; local flyGyro = nil; local targetFlyRotation = nil
+-- ЦИКЛ ОСВЕЩЕНИЯ (Асинхронный)
+task.spawn(function()
+    while task.wait(0.5) do
+        if Config.Fullbright_Enabled then
+            Lighting.Ambient = Color3.new(1, 1, 1)
+            Lighting.OutdoorAmbient = Color3.new(1, 1, 1)
+            Lighting.ColorShift_Bottom = Color3.new(1, 1, 1)
+            Lighting.ColorShift_Top = Color3.new(1, 1, 1)
+        end
+        if Config.NoFog_Enabled then 
+            if Config.NoFog_Mode == "Classic" or Config.NoFog_Mode == "All" then Lighting.FogEnd = 1e9; Lighting.FogStart = 1e9 end
+            if Config.NoFog_Mode == "Atmosphere" or Config.NoFog_Mode == "All" then
+                local currAtmo = Lighting:FindFirstChildOfClass("Atmosphere")
+                if currAtmo then currAtmo.Density = 0; currAtmo.Haze = 0; currAtmo.Glare = 0 end
+            end
+        end
+        if Config.NoShadows_Enabled then Lighting.GlobalShadows = false end
+    end
+end)
+
+
+-- 1. ЦИКЛ ВИЗУАЛА И FREECAM (RenderStepped)
 local fcPos = Vector3.zero; local fcAngles = Vector2.zero
 local isFreecamInitialized = false; local fcBodyVel = nil
 
 table.insert(connections, RunService.RenderStepped:Connect(function(deltaTime)
     local cTime = tick(); table.insert(framesData, cTime); while framesData[1] and framesData[1] < cTime - 1 do table.remove(framesData, 1) end
-    local color1, color2
-    if Config.Rainbow_Enabled then local rc = Color3.fromHSV((cTime * (Config.Rainbow_Speed/10)) % 1, 1, 1); color1 = rc; color2 = rc:Lerp(Color3.new(0,0,0), 0.3) else color1 = Config.UIColor1; color2 = Config.UIColor2 end
-    local staticFadeSequence = ColorSequence.new({ColorSequenceKeypoint.new(0, color1), ColorSequenceKeypoint.new(1, color2)})
+    
+    if Config.Rainbow_Enabled then 
+        local rc = Color3.fromHSV((cTime * (Config.Rainbow_Speed/10)) % 1, 1, 1)
+        CurrentColor1 = rc; CurrentColor2 = rc:Lerp(Color3.new(0,0,0), 0.3) 
+    else 
+        CurrentColor1 = Config.UIColor1; CurrentColor2 = Config.UIColor2 
+    end
+    
+    local staticFadeSequence = ColorSequence.new({ColorSequenceKeypoint.new(0, CurrentColor1), ColorSequenceKeypoint.new(1, CurrentColor2)})
     for _, grad in pairs(dynamicGradientObjects) do grad.Rotation = 90; grad.Color = staticFadeSequence end
     
-    if Config.Fullbright_Enabled then
-        Lighting.Ambient = Color3.new(1, 1, 1)
-        Lighting.OutdoorAmbient = Color3.new(1, 1, 1)
-        Lighting.ColorShift_Bottom = Color3.new(1, 1, 1)
-        Lighting.ColorShift_Top = Color3.new(1, 1, 1)
-    end
-    if Config.NoFog_Enabled then 
-        if Config.NoFog_Mode == "Classic" or Config.NoFog_Mode == "All" then Lighting.FogEnd = 1e9; Lighting.FogStart = 1e9 end
-        if Config.NoFog_Mode == "Atmosphere" or Config.NoFog_Mode == "All" then
-            local currAtmo = Lighting:FindFirstChildOfClass("Atmosphere")
-            if currAtmo then currAtmo.Density = 0; currAtmo.Haze = 0; currAtmo.Glare = 0 end
-        end
-    end
-    if Config.NoShadows_Enabled then Lighting.GlobalShadows = false end
-    
     FOV_Circle.Visible = Config.Aim_FOV_Show
-    if FOV_Circle.Visible then local mPos = UIS:GetMouseLocation(); FOV_Circle.Position = UDim2.new(0, mPos.X, 0, mPos.Y); FOV_Grad.Color = ColorSequence.new(color1) end
-    
-    Aiming.TargetPart = Config.Aim_Target == "Torso" and {"HumanoidRootPart", "Torso", "UpperTorso", "LowerTorso"} or {"Head"}
-    if Config.Aim_TeamCheck then
-        Aiming.Ignored.Teams = {{Team = LocalPlayer.Team, TeamColor = LocalPlayer.TeamColor}}
-    else
-        Aiming.Ignored.Teams = {}
+    if FOV_Circle.Visible then 
+        local mPos = UIS:GetMouseLocation()
+        FOV_Circle.Position = UDim2.new(0, mPos.X, 0, mPos.Y)
+        FOV_Grad.Color = ColorSequence.new(CurrentColor1) 
     end
 
-    if Config.Aim_Enabled or Config.Hitbox_Enabled then
-        Aiming.GetClosestPlayerToCursor()
-    else
-        Aiming.Selected = nil
-        Aiming.SelectedPart = nil
-    end
-    CachedTarget = Aiming.Selected
-
-    local isHoldingBind = IsBindActive(Config.Aim_Bind)
-
-    if Config.Aim_Enabled and isHoldingBind and not Config.Aim_Silent then
-        local target = Aiming.Selected
-        local targetPart = Aiming.SelectedPart
-        if target and targetPart then
-            local aimPos = targetPart.Position + (targetPart.Velocity * (Config.Aim_Predict / 100))
-            if Config.Aim_Mode == "Camera" then Camera.CFrame = Camera.CFrame:Lerp(CFrame.new(Camera.CFrame.Position, aimPos), Config.Aim_Smooth == 1 and 1 or (1 / Config.Aim_Smooth))
-            elseif Config.Aim_Mode == "Mouse" and mousemoverel then
-                local pos, onScreen = Camera:WorldToViewportPoint(aimPos)
-                if onScreen then local mousePos = UIS:GetMouseLocation(); local sm = Config.Aim_Smooth == 1 and 1 or Config.Aim_Smooth; mousemoverel((pos.X - mousePos.X) / sm, (pos.Y - mousePos.Y) / sm) end
-            end
-        end
+    WMFrame.Visible = Config.Watermark_Enabled
+    if Config.Watermark_Enabled then 
+        local ping = "N/A"
+        pcall(function() ping = math.floor(Stats.Network.ServerStatsItem["Data Ping"]:GetValue()) end)
+        WMText.Text = string.format("GameSync | %s | %d FPS | %s ms", LocalPlayer.Name, #framesData, ping)
+        WMText.TextColor3 = CurrentColor1 
     end
 
     if Config.FreeCam_Enabled then
@@ -657,26 +661,164 @@ table.insert(connections, RunService.RenderStepped:Connect(function(deltaTime)
             Camera.CameraType = Enum.CameraType.Custom
             UIS.MouseBehavior = Enum.MouseBehavior.Default
             if fcBodyVel then fcBodyVel:Destroy(); fcBodyVel = nil end
-            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then LocalPlayer.Character.HumanoidRootPart.Anchored = false end
+            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then 
+                LocalPlayer.Character.HumanoidRootPart.Anchored = false 
+            end
             isFreecamInitialized = false
         end
     end
+end))
 
+-- 2. ЦИКЛ ФИЗИКИ (Stepped)
+table.insert(connections, RunService.Stepped:Connect(function()
+    -- Noclip 
+    if Config.Noclip_Enabled then
+        if LocalPlayer.Character then 
+            for _, part in pairs(LocalPlayer.Character:GetDescendants()) do 
+                if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end 
+            end 
+        end
+        lastNoclipState = true
+    elseif lastNoclipState then
+        if LocalPlayer.Character then 
+            for _, part in pairs(LocalPlayer.Character:GetDescendants()) do 
+                if part:IsA("BasePart") then part.CanCollide = true end 
+            end 
+        end
+        lastNoclipState = false
+    end
+
+    -- Hitbox Expander
+    if Config.Hitbox_Enabled then
+        local currentTargets = {}
+        local localCamPos = Camera.CFrame.Position
+
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character then
+                local head = p.Character:FindFirstChild("Head")
+                local hum = p.Character:FindFirstChild("Humanoid")
+                
+                if head and head:IsA("BasePart") then
+                    local isAlive = true
+                    if Config.Aim_DieCheck then isAlive = hum and hum.Health > 0 end
+                    
+                    local isEnemy = not (Config.Aim_TeamCheck and p.Team == LocalPlayer.Team)
+                    local shouldExpand = isEnemy and isAlive and ((Config.Hitbox_Mode == "All") or (Config.Hitbox_Mode == "Target" and p == CachedTarget))
+
+                    if shouldExpand then
+                        currentTargets[head] = true
+                        
+                        if not expandedParts[head] then
+                            expandedParts[head] = { Size = head.Size, Trans = head.Transparency, Collide = head.CanCollide }
+                        end
+                        
+                        local dist = (localCamPos - head.Position).Magnitude
+                        local maxAllowedSize = math.max(expandedParts[head].Size.X, dist * 0.6) 
+                        local dynamicSize = math.min(Config.Hitbox_Size, maxAllowedSize)
+                        
+                        head.Size = Vector3.new(dynamicSize, dynamicSize, dynamicSize)
+                        head.Transparency = Config.Hitbox_Transparency / 100
+                        head.CanCollide = false
+                    end
+                end
+            end
+        end
+        
+        for head, origData in pairs(expandedParts) do
+            if not currentTargets[head] then
+                pcall(function()
+                    head.Size = origData.Size
+                    head.Transparency = origData.Trans
+                    head.CanCollide = origData.Collide
+                end)
+                expandedParts[head] = nil
+            end
+        end
+        
+        lastHitboxState = true
+    elseif lastHitboxState then
+        for head, origData in pairs(expandedParts) do
+            pcall(function()
+                head.Size = origData.Size
+                head.Transparency = origData.Trans
+                head.CanCollide = origData.Collide
+            end)
+        end
+        table.clear(expandedParts)
+        lastHitboxState = false
+    end
+
+    if (Config.VehNoclip_Enabled and Config.Fly_Enabled) or isFlingToggled then
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChild("Humanoid")
+        if hum and hum.SeatPart then
+            local vehicle = hum.SeatPart:FindFirstAncestorOfClass("Model")
+            if vehicle then
+                noclippedVehicle = vehicle
+                for _, part in pairs(vehicle:GetDescendants()) do if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end end
+            end
+        end
+    elseif noclippedVehicle then
+        for _, part in pairs(noclippedVehicle:GetDescendants()) do if part:IsA("BasePart") then part.CanCollide = true end end
+        noclippedVehicle = nil
+    end
+end))
+
+-- 3. ЦИКЛ ЛОГИКИ (Heartbeat)
+local flyBodyVel = nil; local flyGyro = nil; local targetFlyRotation = nil
+
+table.insert(connections, RunService.Heartbeat:Connect(function(deltaTime)
+    -- Aim Logic Target Selection
+    Aiming.TargetPart = Config.Aim_Target == "Torso" and {"HumanoidRootPart", "Torso", "UpperTorso", "LowerTorso"} or {"Head"}
+    if Config.Aim_TeamCheck then
+        Aiming.Ignored.Teams = {{Team = LocalPlayer.Team, TeamColor = LocalPlayer.TeamColor}}
+    else
+        Aiming.Ignored.Teams = {}
+    end
+
+    if Config.Aim_Enabled or Config.Hitbox_Enabled or Config.FreecamAim_Enabled then
+        Aiming.GetClosestPlayerToCursor()
+    else
+        Aiming.Selected = nil; Aiming.SelectedPart = nil
+    end
+    CachedTarget = Aiming.Selected
+
+    local isHoldingAim = IsBindActive(Config.Aim_Bind)
+
+    if Config.Aim_Enabled and isHoldingAim and not Config.FreecamAim_Enabled then
+        local targetPart = Aiming.SelectedPart
+        if targetPart then
+            local aimPos = targetPart.Position + (targetPart.Velocity * (Config.Aim_Predict / 100))
+            if Config.Aim_Mode == "Camera" then 
+                Camera.CFrame = Camera.CFrame:Lerp(CFrame.new(Camera.CFrame.Position, aimPos), Config.Aim_Smooth == 1 and 1 or (1 / Config.Aim_Smooth))
+            elseif Config.Aim_Mode == "Mouse" and mousemoverel then
+                local pos, onScreen = Camera:WorldToViewportPoint(aimPos)
+                if onScreen then 
+                    local mousePos = UIS:GetMouseLocation()
+                    local sm = Config.Aim_Smooth == 1 and 1 or Config.Aim_Smooth
+                    mousemoverel((pos.X - mousePos.X) / sm, (pos.Y - mousePos.Y) / sm) 
+                end
+            end
+        end
+    end
+
+    -- GTA Square
+    local cTime = tick()
     local isSquareActive = (Config.Square_Enabled and ((Config.Square_Mode == "Hold" and IsBindActive(Config.Square_Bind)) or (Config.Square_Mode == "Toggle" and squareToggled)))
     if isSquareActive then
-        local pos = GetSafePos(); SelectionBox.Color3 = color1
+        local pos = GetSafePos(); SelectionBox.Color3 = CurrentColor1
         if Config.Square_Visual == "Classic" then PreviewPart.Size = Vector3.new(4, 0.1, 4); PreviewPart.CFrame = CFrame.new(pos + Vector3.new(0, 0.05, 0))
         else PreviewPart.Size = Vector3.new(2, 0.6, 1.2); PreviewPart.CFrame = CFrame.new(pos + Vector3.new(0, 0.5, 0)) * CFrame.Angles(math.sin(cTime*2)*0.2, cTime * 1.5, math.cos(cTime*2)*0.2) end
         SelectionBox.Visible = true
     else SelectionBox.Visible = false end
 
-    WMFrame.Visible = Config.Watermark_Enabled
-    if Config.Watermark_Enabled then local ping = "N/A"; pcall(function() ping = math.floor(Stats.Network.ServerStatsItem["Data Ping"]:GetValue()) end); WMText.Text = string.format("GameSync | %s | %d FPS | %s ms", LocalPlayer.Name, #framesData, ping); WMText.TextColor3 = color1 end
+    -- Keybinds Frame Updates
     KBFrame.Visible = Config.Keybinds_Enabled
     if Config.Keybinds_Enabled then
         for _, child in pairs(KBFrame:GetChildren()) do if child:IsA("Frame") then child:Destroy() end end
         local activeBinds = {}
         if Config.Aim_Enabled then table.insert(activeBinds, {name = "AimBot", key = Config.Aim_Bind and Config.Aim_Bind.Name or "None"}) end
+        if Config.FreecamAim_Enabled then table.insert(activeBinds, {name = "Magic Bullet", key = Config.Aim_Bind and Config.Aim_Bind.Name or "None"}) end
         if Config.ESP_Enabled then table.insert(activeBinds, {name = "ESP Master", key = "Active"}) end
         if Config.FreeCam_Enabled then table.insert(activeBinds, {name = "FreeCam", key = Config.FreeCam_Bind and Config.FreeCam_Bind.Name or "None"}) end
         if Config.Fly_Enabled then table.insert(activeBinds, {name = "Fly", key = Config.Fly_Bind and Config.Fly_Bind.Name or "None"}) end
@@ -686,12 +828,13 @@ table.insert(connections, RunService.RenderStepped:Connect(function(deltaTime)
         if isFlingToggled then table.insert(activeBinds, {name = "Flinging", key = Config.Fling_Bind and Config.Fling_Bind.Name or "None"}) end
         for i, bind in ipairs(activeBinds) do
             local row = Instance.new("Frame", KBFrame); row.Size = UDim2.new(1, -10, 0, 20); row.BackgroundTransparency = 1
-            local kn = Instance.new("TextLabel", row); kn.Size = UDim2.new(0, 35, 1, 0); kn.BackgroundColor3 = Color3.fromRGB(30,30,30); Instance.new("UICorner", kn).CornerRadius = UDim.new(0, 4); kn.Text = bind.key; kn.TextColor3 = color1; kn.Font = Enum.Font.GothamBold; kn.TextSize = 10
+            local kn = Instance.new("TextLabel", row); kn.Size = UDim2.new(0, 35, 1, 0); kn.BackgroundColor3 = Color3.fromRGB(30,30,30); Instance.new("UICorner", kn).CornerRadius = UDim.new(0, 4); kn.Text = bind.key; kn.TextColor3 = CurrentColor1; kn.Font = Enum.Font.GothamBold; kn.TextSize = 10
             local bn = Instance.new("TextLabel", row); bn.Size = UDim2.new(1, -45, 1, 0); bn.Position = UDim2.new(0, 40, 0, 0); bn.BackgroundTransparency = 1; bn.Text = bind.name; bn.TextColor3 = Color3.fromRGB(200,200,200); bn.Font = Enum.Font.GothamMedium; bn.TextSize = 11; bn.TextXAlignment = Enum.TextXAlignment.Left
         end
-        KBFrame.Size = UDim2.new(0, 160, 0, 30 + (#activeBinds * 22)); KBTitle.TextColor3 = color1
+        KBFrame.Size = UDim2.new(0, 160, 0, 30 + (#activeBinds * 22)); KBTitle.TextColor3 = CurrentColor1
     end
 
+    -- ESP Draw Logic
     if Config.ESP_Enabled then
         for player, esp in pairs(espCache) do
             local isVisible = false
@@ -709,7 +852,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(deltaTime)
                             isVisible = true; local height = math.abs(headPos.Y - bottomPos.Y); local width = height * 0.55 
                             local minX = headPos.X - width/2; local minY = headPos.Y; local maxX = headPos.X + width/2; local maxY = bottomPos.Y
 
-                            local drawColor = (player == CachedTarget and Config.Aim_Enabled) and Color3.new(1, 0, 0) or color1
+                            local drawColor = (player == CachedTarget and Config.Aim_Enabled) and Color3.new(1, 0, 0) or CurrentColor1
 
                             if Config.ESP_Box and esp.BoxLines then
                                 local TL = Vector2.new(minX, minY); local TR = Vector2.new(maxX, minY); local BL = Vector2.new(minX, maxY); local BR = Vector2.new(maxX, maxY)
@@ -763,6 +906,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(deltaTime)
         for _, esp in pairs(espCache) do pcall(function() for i=1,4 do esp.BoxLines[i].Visible = false; esp.BoxOutlines[i].Visible = false end; esp.Drawings.Tracer.Visible = false; esp.Drawings.Name.Visible = false; esp.Drawings.Dist.Visible = false; esp.Drawings.HPText.Visible = false; esp.Drawings.Faction.Visible = false; esp.Drawings.HPBarBg.Visible = false; esp.Drawings.HPBarFill.Visible = false; if esp.Skeleton then for _, bone in pairs(esp.Skeleton) do bone.Visible = false end end end) end
     end
 
+    -- Fly & Fling Logic
     local char = LocalPlayer.Character; local hum = char and char:FindFirstChild("Humanoid"); local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local inVehicle = false; local vehicleRoot = nil
     
@@ -844,144 +988,41 @@ table.insert(connections, RunService.RenderStepped:Connect(function(deltaTime)
     end
 end))
 
-local lastNoclipState = false
-local noclippedVehicle = nil
-local lastHitboxState = false
-local expandedParts = {} -- ИСПРАВЛЕНИЕ: Кэш для безопасного сброса хитбоксов (защита от "отрезанных голов")
-
-table.insert(connections, RunService.Stepped:Connect(function()
-    if Config.Noclip_Enabled then
-        if LocalPlayer.Character then for _, part in pairs(LocalPlayer.Character:GetDescendants()) do if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end end end; lastNoclipState = true
-    elseif lastNoclipState then
-        if LocalPlayer.Character then for _, part in pairs(LocalPlayer.Character:GetDescendants()) do if part:IsA("BasePart") then part.CanCollide = true end end end; lastNoclipState = false
-    end
-
-    if Config.Hitbox_Enabled then
-        local currentTargets = {}
-        local localCamPos = Camera.CFrame.Position
-
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= LocalPlayer and p.Character then
-                local head = p.Character:FindFirstChild("Head")
-                local hum = p.Character:FindFirstChild("Humanoid")
-                
-                if head and head:IsA("BasePart") then
-                    local isAlive = true
-                    if Config.Aim_DieCheck then
-                        isAlive = hum and hum.Health > 0
-                    end
-                    
-                    local isEnemy = not (Config.Aim_TeamCheck and p.Team == LocalPlayer.Team)
-                    local shouldExpand = isEnemy and isAlive and ((Config.Hitbox_Mode == "All") or (Config.Hitbox_Mode == "Target" and p == CachedTarget))
-
-                    if shouldExpand then
-                        currentTargets[head] = true
-                        
-                        -- Сохраняем оригинал один раз
-                        if not expandedParts[head] then
-                            expandedParts[head] = {
-                                Size = head.Size,
-                                Trans = head.Transparency,
-                                Collide = head.CanCollide
-                            }
-                        end
-                        
-                        -- ИСПРАВЛЕНИЕ: Динамический размер хитбокса в зависимости от дистанции
-                        -- Если враг ближе, чем размер хитбокса, хитбокс уменьшается, чтобы камера не оказалась внутри него (иначе выстрел не пройдет).
-                        local dist = (localCamPos - head.Position).Magnitude
-                        local maxAllowedSize = math.max(expandedParts[head].Size.X, dist * 0.6) -- Защитный запас 60% от дистанции
-                        local dynamicSize = math.min(Config.Hitbox_Size, maxAllowedSize)
-                        
-                        head.Size = Vector3.new(dynamicSize, dynamicSize, dynamicSize)
-                        head.Transparency = Config.Hitbox_Transparency / 100
-                        head.CanCollide = false
-                    end
-                end
-            end
-        end
-        
-        -- Безопасно восстанавливаем головы тем, кто больше не является целью (или умер/вышел)
-        for head, origData in pairs(expandedParts) do
-            if not currentTargets[head] then
-                pcall(function()
-                    head.Size = origData.Size
-                    head.Transparency = origData.Trans
-                    head.CanCollide = origData.Collide
-                end)
-                expandedParts[head] = nil
-            end
-        end
-        
-        lastHitboxState = true
-    elseif lastHitboxState then
-        -- Если полностью выключили функцию - сбрасываем всё
-        for head, origData in pairs(expandedParts) do
-            pcall(function()
-                head.Size = origData.Size
-                head.Transparency = origData.Trans
-                head.CanCollide = origData.Collide
-            end)
-        end
-        table.clear(expandedParts)
-        lastHitboxState = false
-    end
-
-    if (Config.VehNoclip_Enabled and Config.Fly_Enabled) or isFlingToggled then
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChild("Humanoid")
-        if hum and hum.SeatPart then
-            local vehicle = hum.SeatPart:FindFirstAncestorOfClass("Model")
-            if vehicle then
-                noclippedVehicle = vehicle
-                for _, part in pairs(vehicle:GetDescendants()) do if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end end
-            end
-        end
-    elseif noclippedVehicle then
-        for _, part in pairs(noclippedVehicle:GetDescendants()) do if part:IsA("BasePart") then part.CanCollide = true end end
-        noclippedVehicle = nil
-    end
-end))
-
+-- Tool Anti-Void
 local function ToolMatch(Handle) for _, Player in ipairs(Players:GetPlayers()) do if Player ~= LocalPlayer and Player.Character then local RightArm = Player.Character:FindFirstChild("Right Arm") or Player.Character:FindFirstChild("RightHand"); if RightArm then local RightGrip = RightArm:FindFirstChild("RightGrip"); if RightGrip and RightGrip.Part1 == Handle then return Player end end end end end
 local function OnCharacterAdded(Character) local RightArm = Character:WaitForChild("Right Arm", 3) or Character:WaitForChild("RightHand", 3); if RightArm then table.insert(connections, RightArm.ChildAdded:Connect(function(child) pcall(function() if Config.Anti_Void and child:IsA("Weld") and child.Name == "RightGrip" then local ConnectedHandle = child.Part1; local matched = ToolMatch(ConnectedHandle); if matched and ConnectedHandle and ConnectedHandle.Parent then ConnectedHandle.Parent:Destroy() end end end) end)) end end
 if LocalPlayer.Character then OnCharacterAdded(LocalPlayer.Character) end; table.insert(connections, LocalPlayer.CharacterAdded:Connect(OnCharacterAdded))
 
+-- Хуки (Magic Bullet + Anti-Kick)
 pcall(function()
     if hookmetamethod then
         local oldNamecall; oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
             if not checkcaller() then
                 local method = getnamecallmethod()
                 
-                if Config.Aim_Enabled and Config.Aim_Silent and Aiming.Selected and Aiming.SelectedPart then
-                    -- ИСПРАВЛЕНИЕ: Вычисляем шанс попадания только в момент самого выстрела/рейкаста!
-                    if CalcChance(Config.Aim_HitChance) then
+                -- Magic Bullet Spoofing
+                if Config.FreecamAim_Enabled and Aiming.Selected and Aiming.SelectedPart then
+                    if IsBindActive(Config.Aim_Bind) then
                         local targetPart = Aiming.SelectedPart
-                        local predPos = targetPart.Position + (targetPart.Velocity * (Config.Aim_Predict / 100))
                         
                         if method == "Raycast" and self == Workspace then
                             local args = {...}
-                            local origin = args[1]
-                            local direction = args[2]
-                            if origin and direction then
-                                local newMag = (predPos - origin).Magnitude
-                                args[2] = (predPos - origin).Unit * math.max(direction.Magnitude, newMag)
-                                return oldNamecall(self, unpack(args))
-                            end
+                            args[1] = targetPart.Position + Vector3.new(0, 2, 0) 
+                            args[2] = Vector3.new(0, -3, 0)
+                            return oldNamecall(self, unpack(args))
                         elseif string.find(method, "FindPartOnRay") and self == Workspace then
                             local args = {...}
-                            local oldRay = args[1]
-                            if oldRay then
-                                local newMag = (predPos - oldRay.Origin).Magnitude
-                                args[1] = Ray.new(oldRay.Origin, (predPos - oldRay.Origin).Unit * math.max(oldRay.Direction.Magnitude, newMag))
-                                return oldNamecall(self, unpack(args))
-                            end
+                            args[1] = Ray.new(targetPart.Position + Vector3.new(0, 2, 0), Vector3.new(0, -3, 0))
+                            return oldNamecall(self, unpack(args))
                         elseif (method == "ViewportPointToRay" or method == "ScreenPointToRay") and self == Camera then
                             local origin = Camera.CFrame.Position
-                            return Ray.new(origin, (predPos - origin).Unit * 1000)
+                            local targetPos = targetPart.Position
+                            return Ray.new(origin, (targetPos - origin).Unit * 1000)
                         end
                     end
                 end
-
+                
+                -- Защита от кика
                 if Config.Anti_Kick then
                     if self == LocalPlayer and tostring(method):lower() == "kick" then return end
                     if typeof(self) == "Instance" and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction")) then
@@ -990,6 +1031,7 @@ pcall(function()
                     end
                 end
                 
+                -- Обход чата
                 if Config.Bypass_Chat and method == "FireServer" and tostring(self) == "SayMessageRequest" then
                     local args = {...}; if type(args[1]) == "string" then
                         local sep = "\243\160\128\149\243\160\128\150\243\160\128\151\243\160\128\152"; local words = string.split(string.gsub(args[1], "[%p]+", ""), " ")
@@ -999,22 +1041,6 @@ pcall(function()
                 end
             end
             return oldNamecall(self, ...)
-        end)
-        
-        local oldIndex; oldIndex = hookmetamethod(game, "__index", function(t, k)
-            if not checkcaller() and Config.Aim_Enabled and Config.Aim_Silent and Aiming.Selected and Aiming.SelectedPart then
-                if CalcChance(Config.Aim_HitChance) then
-                    local targetPart = Aiming.SelectedPart
-                    local predPos = targetPart.Position + (targetPart.Velocity * (Config.Aim_Predict / 100))
-                    
-                    if typeof(t) == "Instance" and t:IsA("Mouse") then
-                        if k == "Hit" or k == "hit" then return CFrame.new(predPos) end
-                        if k == "Target" or k == "target" then return targetPart end
-                        if k == "UnitRay" then return Ray.new(Camera.CFrame.Position, (predPos - Camera.CFrame.Position).Unit * 1000) end
-                    end
-                end
-            end
-            return oldIndex(t, k)
         end)
     end
 end)
